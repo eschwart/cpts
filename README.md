@@ -1,6 +1,6 @@
 # cpts
 
-Easy-to-use CLI that enables you to commit buy or sell transactions on the Solana blockchain. Utilizes Quicknodes and Juptier.
+Easy-to-use CLI that enables you to commit buy or sell transactions on the Solana blockchain. Utilizes [Quicknodes](https://www.quicknode.com/) and [Jupiter](https://jup.ag/).
 
 ## Setup
 You must have a file named `config.json` with the following key/values:
