@@ -1,4 +1,4 @@
-use std::{fs::File, str::FromStr};
+use std::{env::current_exe, fs::File, str::FromStr};
 
 use clap::Parser;
 use serde::Deserialize;
@@ -48,13 +48,24 @@ pub struct Config {
 
 impl Config {
     pub fn new() -> anyhow::Result<Self> {
-        let rdr = File::open("config.json").map_err(|e| {
+        // retrive the path of the relative config.json file.
+        let path = current_exe()?
+            .parent()
+            .ok_or(anyhow::Error::msg(
+                "Failed to retrieve current_exe path directory.",
+            ))?
+            .join("config.json");
+
+        // open the config.json file
+        let rdr = File::open(path).map_err(|e| {
             if let std::io::ErrorKind::NotFound = e.kind() {
                 anyhow::Error::msg("Failed to open file 'config.json'.")
             } else {
                 anyhow::Error::from(e)
             }
         })?;
+
+        // deserialize config.json file into [`Creds`]
         let Creds {
             wallet_address,
             wallet_private_key,
