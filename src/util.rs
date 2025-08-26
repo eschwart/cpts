@@ -1,29 +1,80 @@
+use std::str::FromStr;
+
 use crate::consts::*;
-use jupiter_swap_api_client::{
-    quote::QuoteResponse,
-    swap::{
-        SwapInstructionsResponse, SwapInstructionsResponseInternal, SwapRequest, UiSimulationError,
-    },
-    transaction_config::TransactionConfig,
+use base64::Engine;
+use jupiter_swap_api_client::swap::UiSimulationError;
+use serde::{Deserialize, Serialize};
+use solana_sdk::{
+    pubkey::Pubkey,
+    signature::{Keypair, Signature},
+    transaction::VersionedTransaction,
 };
-use solana_sdk::{instruction::Instruction, pubkey::Pubkey};
 
 pub fn lamports_to_sol(lamports: u64) -> String {
     solana_cli_output::display::build_balance_message(lamports, false, true)
 }
 
-pub fn quote(
-    rpc: &reqwest::blocking::Client,
+#[allow(non_snake_case)]
+#[derive(Serialize, Deserialize, Debug)]
+struct OrderResponse {
+    transaction: String,
+    requestId: String,
+    slippageBps: u64,
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExecuteRequest {
+    signedTransaction: String,
+    requestId: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExecuteSuccess {
+    signature: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExecuteFail {
+    error: String,
+    code: u64,
+}
+
+pub async fn execute(
+    client_req: &reqwest::Client,
+    request: &ExecuteRequest,
+    jupiter_api_key: &str,
+) -> anyhow::Result<Signature> {
+    let res = client_req
+        .post(format!("{JUP_API}/execute"))
+        .json(request)
+        .header("x-api-key", jupiter_api_key)
+        .send()
+        .await?;
+
+    if res.status().is_success() {
+        Ok(Signature::from_str(
+            &res.json::<ExecuteSuccess>().await?.signature,
+        )?)
+    } else {
+        Err(anyhow::Error::msg(res.json::<ExecuteFail>().await?.error))
+    }
+}
+
+pub async fn order(
+    client_req: &reqwest::Client,
     wallet_addr: Pubkey,
+    private_key: &Keypair,
     input_mint: &Pubkey,
     output_mint: &Pubkey,
     amount: u64,
-) -> anyhow::Result<SwapInstructionsResponse> {
-    let res = rpc.get(format!("{JUP_API}/quote?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&slippageBps=200&restrictIntermediateTokens=true")).send()?;
+    jupiter_api_key: &str,
+) -> anyhow::Result<ExecuteRequest> {
+    let res = client_req.get(format!("{JUP_API}/order?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&taker={wallet_addr}&slippageBps=2000")).header("x-api-key", jupiter_api_key).send().await?;
 
     // exit early, if error
     if !res.status().is_success() {
-        let ui_sim_err = res.json::<UiSimulationError>()?;
+        let ui_sim_err = res.json::<UiSimulationError>().await?;
         let ui_sim_err_val = serde_json::to_value(ui_sim_err)?;
         let error = ui_sim_err_val
             .get("error")
@@ -40,42 +91,20 @@ pub fn quote(
         ));
     }
 
-    let quote_response = res.json::<QuoteResponse>()?;
+    let quote_response = res.json::<OrderResponse>().await.unwrap();
 
-    let swap_request = SwapRequest {
-        user_public_key: wallet_addr,
-        quote_response,
-        config: TransactionConfig {
-            wrap_and_unwrap_sol: true,
-            ..Default::default()
-        },
-    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(quote_response.transaction)
+        .unwrap();
+    let vtx_unsigned = bincode::deserialize::<VersionedTransaction>(bytes.as_slice()).unwrap();
 
-    let res = rpc
-        .post(format!("{JUP_API}/swap-instructions"))
-        .json(&swap_request)
-        .send()?;
-    let swap_ixs_internal = res.json::<SwapInstructionsResponseInternal>()?;
-    Ok(swap_ixs_internal.into())
-}
+    let vtx = VersionedTransaction::try_new(vtx_unsigned.message, &[private_key]).unwrap();
 
-pub fn get_ixs(swap_ixs: SwapInstructionsResponse) -> Vec<Instruction> {
-    let mut ixs: Vec<Instruction> = Vec::new();
+    let bytes = bincode::serialize(&vtx).unwrap();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
 
-    if let Some(ix) = swap_ixs.token_ledger_instruction {
-        ixs.push(ix);
-    }
-
-    ixs.extend(swap_ixs.compute_budget_instructions);
-    ixs.extend(swap_ixs.setup_instructions);
-
-    ixs.push(swap_ixs.swap_instruction);
-
-    // if let Some(ix) = swap_ixs.cleanup_instruction {
-    //     ixs.push(ix);
-    // }
-
-    ixs.extend(swap_ixs.other_instructions);
-
-    ixs
+    Ok(ExecuteRequest {
+        signedTransaction: b64,
+        requestId: quote_response.requestId,
+    })
 }

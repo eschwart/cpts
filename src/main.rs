@@ -3,14 +3,13 @@ mod consts;
 mod util;
 
 use cfg::*;
-use consts::*;
 use util::*;
 
-use solana_client::rpc_client::RpcClient;
-use solana_sdk::{commitment_config::CommitmentConfig, transaction::Transaction};
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::commitment_config::CommitmentConfig;
 use std::time::Instant;
 
-fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cfg = Config::new()?;
     let t = Instant::now();
 
@@ -21,20 +20,31 @@ fn run() -> anyhow::Result<()> {
 
     // TODO - `processed` or `confirmed` (most likely) or `finalized`
     let client_rpc = RpcClient::new_with_commitment(cfg.rpc_url(), CommitmentConfig::confirmed());
-    let client_req = reqwest::blocking::Client::new();
+    let client_req = reqwest::Client::new();
 
-    let starting_balance = client_rpc.get_balance(&cfg.wallet_addr())?;
+    let starting_balance = client_rpc.get_balance(&cfg.wallet_addr()).await?;
     println!(
-        "BALANCE : {}\nWALLET  : {}\n",
-        lamports_to_sol(starting_balance),
+        "{} : {}\n",
         cfg.wallet_addr(),
+        lamports_to_sol(starting_balance),
     );
+
+    // exit early if balance flag was provided
+    if cfg.balance() {
+        let ata = spl_associated_token_account::get_associated_token_address(
+            &cfg.wallet_addr(),
+            &cfg.mint(),
+        );
+        let balance_resp = client_rpc.get_token_account_balance(&ata).await?;
+        println!("ATA Balance: {} units", balance_resp.amount.parse::<u64>()?);
+        return Ok(());
+    }
 
     // buying or selling
     let (from, to) = if cfg.is_buy() {
-        (WSOL, cfg.mint())
+        (spl_token::native_mint::ID, cfg.mint())
     } else {
-        (cfg.mint(), WSOL)
+        (cfg.mint(), spl_token::native_mint::ID)
     };
 
     // number of units
@@ -45,7 +55,7 @@ fn run() -> anyhow::Result<()> {
             &cfg.wallet_addr(),
             &cfg.mint(),
         );
-        let balance_resp = client_rpc.get_token_account_balance(&ata)?;
+        let balance_resp = client_rpc.get_token_account_balance(&ata).await?;
         balance_resp.amount.parse()?
     };
 
@@ -56,50 +66,49 @@ fn run() -> anyhow::Result<()> {
         )));
     }
 
-    let quote_res = quote(&client_req, cfg.wallet_addr(), &from, &to, amount)?;
-    let ixs = get_ixs(quote_res);
+    let request = order(
+        &client_req,
+        cfg.wallet_addr(),
+        cfg.private_key(),
+        &from,
+        &to,
+        amount,
+        cfg.jupiter_api_key(),
+    )
+    .await?;
 
-    // retrieve latest blockhash
-    let blockhash = client_rpc.get_latest_blockhash()?;
-    let tx = Transaction::new_signed_with_payer(
-        &ixs,
-        Some(&cfg.wallet_addr()),
-        &[cfg.private_key()],
-        blockhash,
-    );
-
-    if cfg.is_simulation() {
-        let res = client_rpc.simulate_transaction(&tx)?;
-        match res.value.err {
-            None => println!("SUCCESS [{:?} elapsed]: {:?}\n", t.elapsed(), res.value),
-            Some(e) => println!(
-                "FAILURE [{:?} elapsed]: {:?}\n{:#?}\n",
-                t.elapsed(),
-                e,
-                res.value.logs
-            ),
-        }
-    } else {
-        let res = client_rpc.send_and_confirm_transaction(&tx);
-        match res {
-            Ok(sig) => println!("SUCCESS [{:?} elapsed]: {}", t.elapsed(), sig),
-            Err(e) => println!("FAILURE [{:?} elapsed]: {:?}", t.elapsed(), e),
+    // attempt several times
+    for i in 0..3 {
+        if cfg.is_simulation() {
+            todo!()
+        } else {
+            match execute(&client_req, &request, cfg.jupiter_api_key()).await {
+                Ok(s) => {
+                    println!("[{i}] [{:?}] {}", t.elapsed(), s);
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("[{i}] {}", e);
+                    continue;
+                }
+            }
         }
     }
-    let new_balance = client_rpc.get_balance(&cfg.wallet_addr())?;
-    let change = new_balance as i64 - starting_balance as i64;
-    println!(
-        "\nBALANCE: {} -> {} ({}{} change)\n",
-        lamports_to_sol(starting_balance),
-        lamports_to_sol(new_balance),
-        if change.is_positive() { '+' } else { '-' },
-        lamports_to_sol(change.unsigned_abs())
-    );
+    // let new_balance = client_rpc.get_balance(&cfg.wallet_addr()).await?;
+    // let change = new_balance as i64 - starting_balance as i64;
+    // println!(
+    //     "\nBALANCE: {} -> {} ({}{} change)\n",
+    //     lamports_to_sol(starting_balance),
+    //     lamports_to_sol(new_balance),
+    //     if change.is_positive() { '+' } else { '-' },
+    //     lamports_to_sol(change.unsigned_abs())
+    // );
     Ok(())
 }
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("ERROR   : {}", e)
+#[tokio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("ERROR : {}", e)
     }
 }
