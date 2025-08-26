@@ -18,6 +18,7 @@ struct Creds {
     wallet_address: String,
     wallet_private_key: String,
     quicknode_rpc_url: String,
+    jupiter_api_key: String,
 }
 
 /// Execute buys/sells (Quicknodes and Jupiter).
@@ -31,6 +32,10 @@ struct ProgramConfig {
     #[arg(short, long, default_value = None, allow_hyphen_values = true, value_parser = parse)]
     units: Option<(bool, u64)>,
 
+    /// Get token balance.
+    #[arg(short, long, default_value_t)]
+    balance: bool,
+
     /// Dry-run.
     #[arg(short, long, default_value_t)]
     simulate: bool,
@@ -40,10 +45,12 @@ struct ProgramConfig {
 pub struct Config {
     mint: Pubkey,
     units: Option<(bool, u64)>,
+    balance: bool,
     is_simulation: bool,
     wallet_address: Pubkey,
     wallet_private_key: Keypair,
     quicknode_rpc_url: String,
+    jupiter_api_key: String,
 }
 
 impl Config {
@@ -70,6 +77,7 @@ impl Config {
             wallet_address,
             wallet_private_key,
             quicknode_rpc_url,
+            jupiter_api_key,
         } = serde_json::from_reader::<_, Creds>(rdr)?;
 
         let wallet_address = Pubkey::from_str(&wallet_address)?;
@@ -80,10 +88,12 @@ impl Config {
         Ok(Self {
             mint: cfg.mint,
             units: cfg.units,
+            balance: cfg.balance,
             is_simulation: cfg.simulate,
             wallet_address,
             wallet_private_key,
             quicknode_rpc_url,
+            jupiter_api_key,
         })
     }
 
@@ -91,12 +101,12 @@ impl Config {
         self.mint
     }
 
-    pub fn is_buy(&self) -> bool {
-        self.units.is_some_and(|(b, ..)| b)
-    }
-
     pub fn units(&self) -> Option<u64> {
         self.units.map(|(.., v)| v)
+    }
+
+    pub const fn balance(&self) -> bool {
+        self.balance
     }
 
     pub const fn is_simulation(&self) -> bool {
@@ -111,7 +121,15 @@ impl Config {
         &self.wallet_private_key
     }
 
-    pub const fn rpc_url(&self) -> &str {
-        self.quicknode_rpc_url.as_str()
+    pub fn rpc_url(&self) -> String {
+        self.quicknode_rpc_url.clone()
+    }
+
+    pub const fn jupiter_api_key(&self) -> &str {
+        self.jupiter_api_key.as_str()
+    }
+
+    pub fn is_buy(&self) -> bool {
+        self.units.is_some_and(|(b, ..)| b)
     }
 }
